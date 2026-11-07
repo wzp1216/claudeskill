@@ -1,0 +1,15 @@
+{
+  "_说明": "contacts.json 为运行时文件（已被 git 忽略）。由用户维护或经 OA 收件人选择器人工确认后写入。字段说明见 data/README.md。仅 verified=true 的联系人允许直接用于自动填充收件人。",
+  "contacts": [
+    {
+      "name": "示例",
+      "dept": "示例部门",
+      "oa_user_id": "",
+      "oa_username": "",
+      "email": "",
+      "verified": false,
+      "last_verified_at": "",
+      "note": "这是示例条目，实际使用时删除"
+    }
+  ]
+}
