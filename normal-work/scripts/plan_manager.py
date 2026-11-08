@@ -10,7 +10,8 @@
 命令（加 --week 即操作周工作文件：init/rollover/add/update/list）：
   init           初始化指定日期的计划文件（幂等）
   rollover       把近 N 天内未完成计划项滚入指定日期文件（幂等）；
-                 --week 模式把上一周文件未完成项滚入本周文件
+                 --week 模式把上一周文件未完成项滚入本周文件，
+                 可用 --target-week 指定目标周（非周一创建了下周文件时用）
   add            向"今日计划"追加一条计划项（带 --source-id 时自动跳过已存在项）；
                  --week 模式按 --category 追加到周文件分类小节
   update         按 ID 修改计划项（状态/字段）
@@ -493,11 +494,14 @@ def cmd_rollover(args):
     date = args.date
     plan_dir = os.path.join(root, "plan")
     if args.week:
-        monday = monday_of(date)
+        # 目标周文件：默认 date 所在周；--target-week 可显式指定（如周六创建了
+        # 下周文件时，把上周未完成 COPY 进下周文件）
+        monday = monday_of(args.target_week) if args.target_week \
+            else monday_of(date)
         target = week_path(root, monday)
         if not os.path.exists(target):
             raise PlanError("目标周文件不存在，先运行 init --week：%s" % target)
-        # 找上一个周文件（周一日期 < 本周一，取最近）
+        # 找上一个周文件（周一日期 < 目标周一，取最近）
         prev = sorted(
             m.group(1) for f in os.listdir(plan_dir)
             for m in [WEEK_FILE_RE.match(f)] if m and m.group(1) < monday
@@ -508,7 +512,8 @@ def cmd_rollover(args):
             records = [(it, prev[-1]) for it in iter_items(lines)]
         added = roll_items_into(root, target,
                                 WEEK_SECTION_NAMES["rollover"], records)
-        print("周滚动 %d 项（来自 %s）" % (added, prev[-1] if prev else "无上周文件"))
+        print("周滚动 %d 项（来自 %s，目标 %s）"
+              % (added, prev[-1] if prev else "无上周文件", monday))
         return
 
     target = plan_path(root, date)
@@ -866,6 +871,9 @@ def main():
     sp = sub.add_parser("rollover", help="滚动未完成计划项")
     add_common(sp)
     sp.add_argument("--lookback", type=int, default=7, help="回看天数（默认 7）")
+    sp.add_argument("--target-week", type=valid_date,
+                    help="仅 --week：指定目标周的任一日期（默认 date 所在周；"
+                         "用于非周一创建了下周文件时把上周未完成 COPY 进去）")
     sp.set_defaults(func=cmd_rollover)
 
     sp = sub.add_parser("add", help="追加计划项")

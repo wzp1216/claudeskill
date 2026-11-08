@@ -48,8 +48,13 @@ description: 浙江工业职业技术学院日常办公工作流。当用户运�
    `plan_manager.py init --date <今天>`
 4. `plan_manager.py rollover --date <今天>`（幂等）滚动近 7 天未完成项
 5. 周文件：`plan_manager.py init --week --date <今天>` 确保本周周文件存在；
-   若今天是**周一**（或本周周文件不存在且有更早周文件），先
-   `plan_manager.py rollover --week --date <今天>` 把上周未完成 COPY 进本周
+   若今天是**周一**，先 `plan_manager.py rollover --week --date <今天>`
+   把上周未完成 COPY 进本周。
+   **若 init 实际创建了新文件（此前不存在）而今天不是周一**（例如周六运行、
+   周一日期跨周时创建了下周文件），**必须立即执行
+   `rollover --week --date <今天> --target-week <新文件周一>`**——否则上周
+   文件的未完成项永远留在旧文件，新周文件看似"无任何工作"。
+   滚动为幂等操作，重复执行安全
 6. 判断用户意图：
    - 无参数 / "开始工作 / 今日简报" → **子流程 A 晨间简报**
    - "添加/追加/记一下 / 完成 / 取消 / 改优先级" → **子流程 B 计划管理**
