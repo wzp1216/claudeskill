@@ -54,6 +54,25 @@ chrome-devtools MCP（插件 1.4.0）。工具名可能带前缀（如 `mcp__chr
 4. 仍失败时查看 `~/.claude/mcp-needs-auth-cache.json` 是否有该 server 的记录；
    必要时在用户设置中显式注册 MCP server
 
+### `list_pages` 报 "browser is already running for ...chrome-profile"（2026-11-08 实测）
+
+原因：**多个 Claude Code 会话同时运行**，每个会话都拉起自己的 MCP server，
+但 Chrome profile 只有一个；先启动会话的 MCP Chrome 持有 profile 锁，
+后启动会话的 MCP 无法再拉起浏览器，所有浏览器工具全部报此错。
+
+处理步骤（在本会话内即可完成，不影响 profile 登录态）：
+
+1. 找持有 profile 的旧 Chrome 进程：
+   `ps -eo pid,ppid,cmd | grep 'user-data-dir=.*chrome-devtools-mcp'`
+   取主进程（非 --type= 子进程）
+2. `kill -9 <主进程PID>`（其子进程随主进程退出；残留的 crashpad 进程一并 kill）
+3. 删除残留锁文件：
+   `rm -f ~/.cache/chrome-devtools-mcp/chrome-profile/Singleton*`
+4. 重试 `list_pages`：本会话 MCP 会重新拉起 Chrome（登录态在 profile 中，不丢）
+
+预防：同一时刻只开一个 Claude Code 会话跑 normal-work；确需多开会话时，
+只有正在做浏览器操作的会话能拿到浏览器，其余会话降级为文本粘贴模式。
+
 ## 隐私与安全
 
 - 不读取、不保存 localStorage token、Cookie、密码

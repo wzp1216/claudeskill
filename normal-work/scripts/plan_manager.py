@@ -7,15 +7,20 @@
 发送审计日志。语义判断（通知归类、建议项、邮件措辞）由 Claude 完成，本脚本
 不参与。
 
-命令：
+命令（加 --week 即操作周工作文件：init/rollover/add/update/list）：
   init           初始化指定日期的计划文件（幂等）
-  rollover       把近 N 天内未完成计划项滚入指定日期文件（幂等）
-  add            向"今日计划"追加一条计划项
+  rollover       把近 N 天内未完成计划项滚入指定日期文件（幂等）；
+                 --week 模式把上一周文件未完成项滚入本周文件
+  add            向"今日计划"追加一条计划项（带 --source-id 时自动跳过已存在项）；
+                 --week 模式按 --category 追加到周文件分类小节
   update         按 ID 修改计划项（状态/字段）
   list           列出指定日期文件中的计划项
-  replace-block  整体替换门户/OA 生成块内容
-  reminders      刷新"待提醒清单"小节
-  log-send       追加一封邮件的发送审计日志（jsonl）
+  replace-block  整体替换门户/OA 生成块内容（仅日文件）
+  replace-section 整体替换周文件小节内容（--week --section 分类；用于写入
+                 "未读取"等状态标注，内容可为 --content 或 --content-file）
+  reminders      刷新"待提醒清单"小节（仅日文件）
+  set-status     更新文件头"数据源"行中门户/OA 的读取状态（仅日文件）
+  log-send       追加一封邮件的发送审计日志（jsonl，仅日文件）
 
 计划项行格式：
   - [ ] `T-20261107-01` 事项标题
@@ -54,13 +59,31 @@ SECTION_NAMES = {
     "notes": "六、备注",
 }
 
-ITEM_RE = re.compile(r"^- \[([ xX-])\] `(T-\d{8}-\d{2,})`\s*(.*)$")
+# 周工作文件小节与分类子小节（"一、本周工作提示单"下）
+WEEK_SECTION_NAMES = {
+    "prompt": "一、本周工作提示单",
+    "rollover": "二、上周未完成（滚动）",
+    "notes": "三、备注",
+}
+WEEK_CATEGORIES = {
+    "oa-mail": "### 1.1 OA 邮件",
+    "oa-notice": "### 1.2 OA 公告",
+    "oa-approve": "### 1.3 OA 我的工作",
+    "portal-notice": "### 1.4 门户通知",
+    "portal-meeting": "### 1.5 门户会议",
+    "manual": "### 1.6 手动添加",
+}
+
+ITEM_RE = re.compile(r"^- \[([ xX-])\] `([TW]-\d{8}-\d{2,})`\s*(.*)$")
 FIELD_RE = re.compile(r"^  - ([^：]+)：\s*(.*)$")
-SECTION_RE = re.compile(r"^## (.+)$")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 BLOCK_START_RE = re.compile(r"^<!-- normal-work:(\w+):start -->$")
 BLOCK_END_RE = re.compile(r"^<!-- normal-work:(\w+):end -->$")
 UPDATED_RE = re.compile(r"^(> 最近更新：).*$")
 DATE_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
+WEEK_FILE_RE = re.compile(r"^week-(\d{4}-\d{2}-\d{2})\.md$")
+SOURCE_STATUS_RE = re.compile(
+    r"^(> 数据源：融合门户 \[)([^\]]*)(\] ｜ 通达OA \[)([^\]]*)(\].*)$")
 
 # 计划项中允许出现的字段名（规范化显示顺序）
 FIELD_ORDER = ["优先级", "截止", "涉及人员", "OA提醒", "来源", "来源ID",
@@ -95,6 +118,24 @@ def plan_path(root, date):
     return os.path.join(root, "plan", "%s.md" % date)
 
 
+def week_path(root, monday):
+    """周工作文件路径：plan/week-<周一日期>.md。"""
+    return os.path.join(root, "plan", "week-%s.md" % monday)
+
+
+def monday_of(date_str):
+    """返回 date_str 所在周的周一日期字符串。"""
+    d = datetime.date.fromisoformat(date_str)
+    return (d - datetime.timedelta(days=d.weekday())).isoformat()
+
+
+def week_span(monday_str):
+    """返回周一起始的周日期区间文本：2026-11-09 至 2026-11-15。"""
+    d = datetime.date.fromisoformat(monday_str)
+    end = d + datetime.timedelta(days=6)
+    return "%s 至 %s" % (d.isoformat(), end.isoformat())
+
+
 def today_str():
     return datetime.date.today().isoformat()
 
@@ -106,6 +147,15 @@ def now_str():
 def weekday_cn(date_str):
     d = datetime.date.fromisoformat(date_str)
     return WEEKDAYS[d.weekday()]
+
+
+def valid_date(s):
+    """argparse type：校验 YYYY-MM-DD，失败即报错退出。"""
+    try:
+        datetime.date.fromisoformat(s)
+        return s
+    except ValueError:
+        raise argparse.ArgumentTypeError("日期格式应为 YYYY-MM-DD：%r" % s)
 
 
 def norm_title(t):
@@ -163,16 +213,20 @@ def touch_updated(lines):
 
 # ---------------------------------------------------------------- 结构定位
 
-def find_section(lines, section_name):
+def find_section(lines, section_name, level=2):
     """返回小节头行之后的起始行号与下一小节前的结束行号（均为索引）。
+    level 为小节标题级别（## = 2，### = 3）；同级或更高级标题为边界。
+    section_name 可带"### "前缀（如周文件分类子小节），比较时剥掉。
     找不到小节时返回 (None, None)。"""
+    target = re.sub(r"^#{1,6}\s+", "", section_name).strip()
     start = None
     for i, ln in enumerate(lines):
-        m = SECTION_RE.match(ln)
-        if m and m.group(1).strip() == section_name:
+        m = HEADING_RE.match(ln)
+        if m and m.group(2).strip() == target \
+                and len(m.group(1)) == level:
             start = i
             continue
-        if start is not None and m:
+        if start is not None and m and len(m.group(1)) <= level:
             return start + 1, i
     if start is not None:
         return start + 1, len(lines)
@@ -243,9 +297,15 @@ def item_to_lines(item, status=None):
     return out
 
 
+def section_level(section_name):
+    """小节标题级别：名称以"###"开头为 3 级（周文件分类子小节），否则 2 级。"""
+    return 3 if section_name.startswith("### ") else 2
+
+
 def insert_item_block(lines, section_name, item):
     """向小节末尾插入计划项；若小节内有"（无）"占位行则替换之。"""
-    start, end = find_section(lines, section_name)
+    start, end = find_section(lines, section_name,
+                              level=section_level(section_name))
     if start is None:
         raise PlanError("计划文件缺少小节：%s" % section_name)
     block = item_to_lines(item)
@@ -259,10 +319,24 @@ def insert_item_block(lines, section_name, item):
 
 def remove_placeholder(lines, section_name):
     """删除小节中的"（无）"占位行（有实际内容后）。"""
-    start, end = find_section(lines, section_name)
+    start, end = find_section(lines, section_name,
+                              level=section_level(section_name))
     if start is None:
         return
     idx = [i for i in range(start, end) if lines[i].strip() == "（无）"]
+    for i in reversed(idx):
+        lines.pop(i)
+
+
+def remove_status_note(lines, section_name):
+    """删除小节中的"未读取（...）"状态标注行（有实际内容后，标注即失效）。
+    周文件标注统一以"未读取"开头（可带"OA "前缀，格式见 plan-format.md）。"""
+    start, end = find_section(lines, section_name,
+                              level=section_level(section_name))
+    if start is None:
+        return
+    idx = [i for i in range(start, end)
+           if re.match(r"^(OA )?未读取", lines[i].strip())]
     for i in reversed(idx):
         lines.pop(i)
 
@@ -308,123 +382,234 @@ def template_lines(date):
     ]
 
 
+def week_template_lines(monday):
+    """周工作文件模板（date 应为周一日期，非周一按所在周周一处理）。"""
+    now = now_str()
+    span = week_span(monday)
+    return [
+        "# %s 工作提示单" % span,
+        "",
+        "> 生成：%s ｜ 最近更新：%s" % (now, now),
+        "> 标记：[ ] 待办 ｜ [x] 完成 ｜ [-] 取消",
+        "",
+        "## 一、本周工作提示单",
+        "### 1.1 OA 邮件",
+        "（无）",
+        "### 1.2 OA 公告",
+        "（无）",
+        "### 1.3 OA 我的工作",
+        "（无）",
+        "### 1.4 门户通知",
+        "（无）",
+        "### 1.5 门户会议",
+        "（无）",
+        "### 1.6 手动添加",
+        "（无）",
+        "",
+        "## 二、上周未完成（滚动）",
+        "（无）",
+        "",
+        "## 三、备注",
+        "",
+    ]
+
+
 # ---------------------------------------------------------------- 命令实现
 
 def cmd_init(args):
     root = resolve_root(args.root)
     date = args.date
-    path = plan_path(root, date)
+    if args.week:
+        monday = monday_of(date)
+        path = week_path(root, monday)
+        maker = lambda: week_template_lines(monday)
+    else:
+        path = plan_path(root, date)
+        maker = lambda: template_lines(date)
     if os.path.exists(path) and not args.overwrite:
         print("已存在，跳过：%s" % path)
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with FileLock(root):
-        write_lines(path, template_lines(date))
+        write_lines(path, maker())
     print("已初始化：%s" % path)
+
+
+def rolled_fields(it, file_date):
+    """构建滚动后的计划项字段：滚动次数 +1；来源日保留；
+    原计划日 = 最近一次所在日期（与来源日不同才写，每次滚动重算）。"""
+    fields = []
+    for k, v in it["fields"]:
+        if k == "滚动次数":
+            fields.append([k, str(int(v or 0) + 1)])
+        elif k == "来源日":
+            fields.append([k, v])
+        elif k == "原计划日":
+            continue
+        elif k in FIELD_ORDER:
+            fields.append([k, v])
+    if field_value(it, "滚动次数") is None:
+        fields.append(["滚动次数", "1"])
+    src_day = field_value(it, "来源日")
+    if src_day is None:
+        fields.append(["来源日", file_date])
+    elif file_date != src_day:
+        fields.append(["原计划日", file_date])
+    return sorted(fields,
+                  key=lambda kv: FIELD_ORDER.index(kv[0])
+                  if kv[0] in FIELD_ORDER else 99)
+
+
+def roll_items_into(root, target, section_name, records):
+    """把 records（[(item, file_date), ..]）滚入 target 文件的 section_name
+    小节，按 ID/标题去重，幂等。返回滚动条数。"""
+    if not records:
+        return 0
+    lines = read_lines(target)
+    existing_ids = {it["id"] for it in iter_items(lines)}
+    existing_titles = {norm_title(it["title"]) for it in iter_items(lines)}
+    added = 0
+    for it, file_date in records:
+        if it["status"] != " ":  # 仅待办滚动；完成/取消不滚动
+            continue
+        if it["id"] in existing_ids \
+                or norm_title(it["title"]) in existing_titles:
+            continue
+        rolled = {"id": it["id"], "status": " ",
+                  "title": it["title"],
+                  "fields": rolled_fields(it, file_date)}
+        insert_item_block(lines, section_name, rolled)
+        remove_placeholder(lines, section_name)
+        existing_ids.add(it["id"])
+        added += 1
+    if added:
+        touch_updated(lines)
+        write_lines(target, lines)
+    return added
 
 
 def cmd_rollover(args):
     root = resolve_root(args.root)
     date = args.date
-    lookback = args.lookback
     plan_dir = os.path.join(root, "plan")
+    if args.week:
+        monday = monday_of(date)
+        target = week_path(root, monday)
+        if not os.path.exists(target):
+            raise PlanError("目标周文件不存在，先运行 init --week：%s" % target)
+        # 找上一个周文件（周一日期 < 本周一，取最近）
+        prev = sorted(
+            m.group(1) for f in os.listdir(plan_dir)
+            for m in [WEEK_FILE_RE.match(f)] if m and m.group(1) < monday
+        )
+        records = []
+        if prev:
+            lines = read_lines(week_path(root, prev[-1]))
+            records = [(it, prev[-1]) for it in iter_items(lines)]
+        added = roll_items_into(root, target,
+                                WEEK_SECTION_NAMES["rollover"], records)
+        print("周滚动 %d 项（来自 %s）" % (added, prev[-1] if prev else "无上周文件"))
+        return
+
     target = plan_path(root, date)
     if not os.path.exists(target):
         raise PlanError("目标计划文件不存在，先运行 init：%s" % target)
-
-    today_lines = read_lines(target)
-    existing_ids = {it["id"] for it in iter_items(today_lines)}
-    existing_titles = {norm_title(it["title"]) for it in iter_items(today_lines)}
 
     # 收集近 N 天内（不含当日）各文件中的计划项，最新状态覆盖旧状态
     dates = sorted(
         f[:-3] for f in os.listdir(plan_dir)
         if DATE_FILE_RE.match(f) and f[:-3] != date
     )
-    dates = dates[-lookback:] if lookback > 0 else []
-    latest = {}  # id -> dict(item, file_date)
+    dates = dates[-args.lookback:] if args.lookback > 0 else []
+    latest = {}  # id -> (item, file_date)
     for d in dates:
         lines = read_lines(plan_path(root, d))
         for it in iter_items(lines):
-            latest[it["id"]] = {"item": it, "file_date": d}
+            latest[it["id"]] = (it, d)
 
-    added = []
-    for iid, rec in latest.items():
-        it = rec["item"]
-        if it["status"] not in (" ", "x", "X", "-"):
-            continue
-        if it["status"] != " ":  # 完成/取消不滚动
-            continue
-        if iid in existing_ids or norm_title(it["title"]) in existing_titles:
-            continue
-        # 构建滚动后的字段
-        fields = []
-        for k, v in it["fields"]:
-            if k == "滚动次数":
-                fields.append([k, str(int(v or 0) + 1)])
-            elif k == "原计划日" or k == "来源日":
-                fields.append([k, v])
-            elif k in FIELD_ORDER:
-                fields.append([k, v])
-        if field_value(it, "滚动次数") is None:
-            fields.append(["滚动次数", "1"])
-        if field_value(it, "来源日") is None:
-            fields.append(["来源日", rec["file_date"]])
-        elif field_value(it, "原计划日") is None \
-                and field_value(it, "来源日") != rec["file_date"]:
-            fields.append(["原计划日", rec["file_date"]])
-        rolled = {"id": iid, "status": " ", "title": it["title"],
-                  "fields": sorted(fields, key=lambda kv: FIELD_ORDER.index(kv[0])
-                                   if kv[0] in FIELD_ORDER else 99)}
-        with FileLock(root):
-            lines = read_lines(target)
-            insert_item_block(lines, SECTION_NAMES["rollover"], rolled)
-            remove_placeholder(lines, SECTION_NAMES["rollover"])
-            touch_updated(lines)
-            write_lines(target, lines)
-        added.append(iid)
-        existing_ids.add(iid)
-
-    print("滚动 %d 项：%s" % (len(added), "、".join(added) if added else "无新滚动项"))
+    records = list(latest.values())
+    with FileLock(root):
+        added = roll_items_into(root, target,
+                                SECTION_NAMES["rollover"], records)
+    ids = "、".join(r[0]["id"] for r in records
+                    if r[0]["status"] == " ") if added else "无新滚动项"
+    print("滚动 %d 项：%s" % (added, ids))
 
 
-def next_id(lines, date):
+def next_id(lines, date, prefix="T"):
+    """分配计划项 ID：<prefix>-YYYYMMDD-NN（prefix 日文件 T / 周文件 W）。"""
     used = [it["id"] for it in iter_items(lines)]
+    pfx = "%s-%s-" % (prefix, date.replace("-", ""))
     nums = [int(iid.split("-")[-1]) for iid in used
-            if iid.startswith("T-%s-" % date.replace("-", ""))]
+            if iid.startswith(pfx)]
     n = max(nums) + 1 if nums else 1
-    return "T-%s-%02d" % (date.replace("-", ""), n)
+    return "%s-%s-%02d" % (prefix, date.replace("-", ""), n)
 
 
 def cmd_add(args):
     root = resolve_root(args.root)
     date = args.date
-    target = plan_path(root, date)
-    if not os.path.exists(target):
-        raise PlanError("目标计划文件不存在，先运行 init：%s" % target)
-    fields = []
-    if args.priority:
-        fields.append(["优先级", args.priority])
-    if args.deadline:
-        fields.append(["截止", args.deadline])
-    if args.people:
-        fields.append(["涉及人员", args.people])
-    if args.reminder:
-        fields.append(["OA提醒", args.reminder])
-    if args.source:
-        fields.append(["来源", args.source])
-    if args.source_id:
-        fields.append(["来源ID", args.source_id])
-    if args.link:
-        fields.append(["链接", args.link])
-    if args.note:
-        fields.append(["备注", args.note])
+    if args.week:
+        monday = monday_of(date)
+        target = week_path(root, monday)
+        if not os.path.exists(target):
+            raise PlanError("目标周文件不存在，先运行 init --week：%s" % target)
+        section = WEEK_CATEGORIES[args.category]
+        id_prefix = "W"
+        id_date = monday
+        fields = []
+        if args.priority:
+            fields.append(["优先级", args.priority])
+        if args.deadline:
+            fields.append(["截止", args.deadline])
+        if args.people:
+            fields.append(["涉及人员", args.people])
+        if args.source:
+            fields.append(["来源", args.source])
+        if args.source_id:
+            fields.append(["来源ID", args.source_id])
+        if args.link:
+            fields.append(["链接", args.link])
+        if args.note:
+            fields.append(["备注", args.note])
+    else:
+        target = plan_path(root, date)
+        if not os.path.exists(target):
+            raise PlanError("目标计划文件不存在，先运行 init：%s" % target)
+        section = SECTION_NAMES["today"]
+        id_prefix = "T"
+        id_date = date
+        fields = [["OA提醒", args.reminder or "无需"]]  # 默认无需
+        if args.priority:
+            fields.append(["优先级", args.priority])
+        if args.deadline:
+            fields.append(["截止", args.deadline])
+        if args.people:
+            fields.append(["涉及人员", args.people])
+        if args.source:
+            fields.append(["来源", args.source])
+        if args.source_id:
+            fields.append(["来源ID", args.source_id])
+        if args.link:
+            fields.append(["链接", args.link])
+        if args.note:
+            fields.append(["备注", args.note])
+    fields = sorted(fields,
+                    key=lambda kv: FIELD_ORDER.index(kv[0])
+                    if kv[0] in FIELD_ORDER else 99)
     with FileLock(root):
         lines = read_lines(target)
-        iid = next_id(lines, date)
+        if args.source_id:
+            for it in iter_items(lines):
+                if field_value(it, "来源ID") == args.source_id:
+                    print("跳过：来源ID 已存在（%s %s）"
+                          % (it["id"], it["title"]))
+                    return
+        iid = next_id(lines, id_date, prefix=id_prefix)
         item = {"id": iid, "status": " ", "title": args.title, "fields": fields}
-        insert_item_block(lines, SECTION_NAMES["today"], item)
-        remove_placeholder(lines, SECTION_NAMES["today"])
+        insert_item_block(lines, section, item)
+        remove_placeholder(lines, section)
+        remove_status_note(lines, section)
         touch_updated(lines)
         write_lines(target, lines)
     print(iid)
@@ -433,7 +618,10 @@ def cmd_add(args):
 
 def cmd_update(args):
     root = resolve_root(args.root)
-    target = plan_path(root, args.date)
+    if args.week:
+        target = week_path(root, monday_of(args.date))
+    else:
+        target = plan_path(root, args.date)
     if not os.path.exists(target):
         raise PlanError("目标计划文件不存在：%s" % target)
     if args.id is None:
@@ -476,7 +664,10 @@ def cmd_update(args):
 
 def cmd_list(args):
     root = resolve_root(args.root)
-    target = plan_path(root, args.date)
+    if args.week:
+        target = week_path(root, monday_of(args.date))
+    else:
+        target = plan_path(root, args.date)
     if not os.path.exists(target):
         print("[]")
         return
@@ -514,6 +705,75 @@ def cmd_replace_block(args):
         touch_updated(lines)
         write_lines(target, lines)
     print("已替换生成块 %s（%d 行）" % (args.name, len(content)))
+
+
+def cmd_replace_section(args):
+    """整体替换周文件小节内容（如把"（无）"占位换成"未读取（原因）"标注）。
+    --section 用 WEEK_CATEGORIES 的分类名或 WEEK_SECTION_NAMES 的小节名；
+    内容来自 --content（单行，含换行用 \\n）或 --content-file（多行）。"""
+    root = resolve_root(args.root)
+    target = week_path(root, monday_of(args.date))
+    if not os.path.exists(target):
+        raise PlanError("目标周文件不存在：%s" % target)
+    if args.content is not None and args.content_file is not None:
+        raise PlanError("--content 与 --content-file 不能同时给")
+    if args.content is not None:
+        content = args.content.replace("\\n", "\n").splitlines()
+    elif args.content_file:
+        if not os.path.exists(args.content_file):
+            raise PlanError("内容文件不存在：%s" % args.content_file)
+        with open(args.content_file, encoding="utf-8") as f:
+            content = f.read().splitlines()
+    else:
+        raise PlanError("replace-section 至少需要 --content 或 --content-file")
+    section_name = WEEK_CATEGORIES.get(args.section) \
+        or WEEK_SECTION_NAMES.get(args.section)
+    if section_name is None:
+        raise PlanError("--section 仅支持周文件小节：%s / %s"
+                        % ("、".join(sorted(WEEK_CATEGORIES)),
+                           "、".join(sorted(WEEK_SECTION_NAMES))))
+    level = 3 if section_name.startswith("### ") else 2
+    with FileLock(root):
+        lines = read_lines(target)
+        span = find_section(lines, section_name, level=level)
+        if span[0] is None:
+            raise PlanError("周文件缺少小节：%s" % section_name)
+        start, end = span
+        lines[start:end] = content
+        touch_updated(lines)
+        write_lines(target, lines)
+    print("已替换小节 %s（%d 行）" % (section_name, len(content)))
+
+
+def cmd_set_status(args):
+    """更新文件头"数据源"行：--portal/--oa 至少给一个，未给的一项保留原值。"""
+    root = resolve_root(args.root)
+    target = plan_path(root, args.date)
+    if not os.path.exists(target):
+        raise PlanError("目标计划文件不存在：%s" % target)
+    if args.portal is None and args.oa is None:
+        raise PlanError("set-status 至少需要 --portal 或 --oa 之一")
+    with FileLock(root):
+        lines = read_lines(target)
+        idx = None
+        for i, ln in enumerate(lines):
+            if ln.startswith("> 数据源："):
+                idx = i
+                break
+        if idx is None:
+            raise PlanError("计划文件缺少数据源行")
+        m = SOURCE_STATUS_RE.match(lines[idx])
+        portal_state = args.portal if args.portal is not None \
+            else (m.group(2) if m else "未读取")
+        oa_state = args.oa if args.oa is not None \
+            else (m.group(4) if m else "未读取")
+        new_line = "> 数据源：融合门户 [%s] ｜ 通达OA [%s]" \
+            % (portal_state, oa_state)
+        if lines[idx] != new_line:
+            lines[idx] = new_line
+            touch_updated(lines)
+            write_lines(target, lines)
+        print(new_line)
 
 
 def cmd_reminders(args):
@@ -580,12 +840,18 @@ def cmd_log_send(args):
 
 # ---------------------------------------------------------------- 入口
 
-def add_common(sp):
-    """给子命令也加上 --root/--date（子命令前后均可写）。"""
+def add_common(sp, week=True):
+    """给子命令也加上 --root/--date（子命令前后均可写）。
+    week=False 用于仅日文件的命令（replace-block/reminders/set-status/
+    log-send）。"""
     sp.add_argument("--root", help="运行时根目录（默认取 config.json，无则 "
                                    "/media/data/AAAwork/claude/normal-work）")
-    sp.add_argument("--date", default=today_str(),
+    sp.add_argument("--date", type=valid_date, default=today_str(),
                     help="计划日期 YYYY-MM-DD（默认今天）")
+    if week:
+        sp.add_argument("--week", action="store_true",
+                        help="操作周工作文件 plan/week-<周一日期>.md"
+                             "（date 自动取所在周周一）")
 
 
 def main():
@@ -605,10 +871,13 @@ def main():
     sp = sub.add_parser("add", help="追加计划项")
     add_common(sp)
     sp.add_argument("--title", required=True)
+    sp.add_argument("--category", choices=sorted(WEEK_CATEGORIES.keys()),
+                    default="manual",
+                    help="周文件分类（仅 --week 时使用，默认 manual）")
     sp.add_argument("--priority", choices=["高", "中", "低"])
     sp.add_argument("--deadline")
     sp.add_argument("--people")
-    sp.add_argument("--reminder", help="OA提醒状态，如 无需/未生成")
+    sp.add_argument("--reminder", help="OA提醒状态，如 无需/未生成（仅日文件）")
     sp.add_argument("--source")
     sp.add_argument("--source-id")
     sp.add_argument("--link")
@@ -636,17 +905,34 @@ def main():
     sp.set_defaults(func=cmd_list)
 
     sp = sub.add_parser("replace-block", help="替换生成块")
-    add_common(sp)
+    add_common(sp, week=False)
     sp.add_argument("--name", choices=["portal", "oa"], required=True)
     sp.add_argument("--content-file", required=True)
     sp.set_defaults(func=cmd_replace_block)
 
-    sp = sub.add_parser("reminders", help="刷新待提醒清单")
+    sp = sub.add_parser("replace-section", help="替换周文件小节内容")
     add_common(sp)
+    sp.add_argument("--section", required=True,
+                    help="周文件小节：oa-mail/oa-notice/oa-approve/"
+                         "portal-notice/portal-meeting/manual/"
+                         "prompt/rollover/notes")
+    sp.add_argument("--content", help="小节新内容（单行，\\n 换行）")
+    sp.add_argument("--content-file", help="小节新内容文件（多行）")
+    sp.set_defaults(func=cmd_replace_section)
+
+    sp = sub.add_parser("reminders", help="刷新待提醒清单")
+    add_common(sp, week=False)
     sp.set_defaults(func=cmd_reminders)
 
+    sp = sub.add_parser("set-status", help="更新数据源状态行")
+    add_common(sp, week=False)
+    sp.add_argument("--portal", help="融合门户状态，如 正常 / 未读取 / "
+                                     "不可用：连接失败")
+    sp.add_argument("--oa", help="通达OA状态，如 正常 / 未读取（可能维护中）")
+    sp.set_defaults(func=cmd_set_status)
+
     sp = sub.add_parser("log-send", help="记录发送审计日志")
-    add_common(sp)
+    add_common(sp, week=False)
     sp.add_argument("--item-id", required=True)
     sp.add_argument("--to", help="收件人，格式 name|dept|oa_user_id，多个用 ; 分隔")
     sp.add_argument("--cc")
