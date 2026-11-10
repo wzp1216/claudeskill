@@ -1,0 +1,23 @@
+{
+  "user": {
+    "name": "姓名",
+    "job_number": "工号",
+    "dept": "部门",
+    "password": "密码（本机使用，不写入其它文件）"
+  },
+  "paths": {
+    "runtime_root": "/media/data/AAAwork/claude/check-oa",
+    "tmp_dir": "/media/data/AAAwork/claude/check-oa/tmp"
+  },
+  "urls": {
+    "portal_home": "https://dsc.zjipc.cn/pcportal/start/index.html#/portal/home",
+    "oa_base": "https://xt.zjipc.cn",
+    "oa_inbox": "https://xt.zjipc.cn/general/email/inbox/?BOX_ID=0&boxname=inbox0&boxid=0",
+    "oa_notify_list": "https://xt.zjipc.cn/general/notify/show/"
+  },
+  "limits": {
+    "scan_days": 30,
+    "max_open_per_run": 20
+  },
+  "first_run_calibrated": false
+}
