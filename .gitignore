@@ -1,0 +1,8 @@
+# 运行时个人数据（不入库，防凭据泄漏）
+**/data/config.json
+**/data/contacts.json
+**/data/last_check.json
+
+# Python 缓存
+**/__pycache__/
+*.pyc

@@ -7,17 +7,23 @@
   },
   "paths": {
     "runtime_root": "/media/data/AAAwork/claude/check-oa",
-    "tmp_dir": "/media/data/AAAwork/claude/check-oa/tmp"
+    "tmp_dir": "/media/data/AAAwork/claude/check-oa/tmp",
+    "task_file": "/media/data/AAAwork/OA任务.md",
+    "done_file": "/media/data/AAAwork/claude/check-oa/已完成任务.md"
   },
   "urls": {
     "portal_home": "https://dsc.zjipc.cn/pcportal/start/index.html#/portal/home",
+    "portal_report": "https://dsc.zjipc.cn/webroot/decision/view/report?viewlet=xxkj%2Fhdqd%2Fhyapb_week.cpt&date=<周一日期>",
     "oa_base": "https://xt.zjipc.cn",
     "oa_inbox": "https://xt.zjipc.cn/general/email/inbox/?BOX_ID=0&boxname=inbox0&boxid=0",
     "oa_notify_list": "https://xt.zjipc.cn/general/notify/show/"
   },
   "limits": {
-    "scan_days": 30,
-    "max_open_per_run": 20
+    "scan_days": 10,
+    "max_open_per_run": 20,
+    "notice_max": 30,
+    "notice_detail_max": 5,
+    "meeting_detail_max": 3
   },
   "first_run_calibrated": false
 }

@@ -1,7 +1,0 @@
-# 运行时个人数据（不入库）
-data/config.json
-data/contacts.json
-
-# Python 缓存
-__pycache__/
-*.pyc

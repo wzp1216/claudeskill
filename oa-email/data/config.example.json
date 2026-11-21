@@ -1,0 +1,25 @@
+{
+  "user": {
+    "name": "万志平",
+    "job_number": "19980005",
+    "dept": "教务处",
+    "password": ""
+  },
+  "paths": {
+    "runtime_root": "/media/data/AAAwork/claude/oa-email",
+    "drafts_dir": "/media/data/AAAwork/claude/oa-email/drafts",
+    "logs_dir": "/media/data/AAAwork/claude/oa-email/logs",
+    "tmp_dir": "/media/data/AAAwork/claude/oa-email/tmp"
+  },
+  "urls": {
+    "oa_base": "https://xt.zjipc.cn",
+    "oa_compose": "https://xt.zjipc.cn/general/email/new/",
+    "oa_sentbox": "https://xt.zjipc.cn/general/email/sentbox/?BOX_ID=0"
+  },
+  "limits": {
+    "max_emails_per_run": 10,
+    "max_recipients": 5,
+    "max_body_chars": 200
+  },
+  "first_run_calibrated": false
+}
