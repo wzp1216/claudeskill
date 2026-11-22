@@ -74,6 +74,42 @@ def add_rule(slide, x, y, w, color=RULE, h=0.03):
     shp.fill.solid(); shp.fill.fore_color.rgb = color
     shp.line.fill.background()
     return shp
+
+def add_breadcrumb(slide, sections, active, bar_h=0.35):
+    """顶部小节导航条：通栏浅色背景，当前小节高亮并加下划线。
+
+    sections: 小节标题列表（全 deck 统一一份）；active: 当前小节下标（0 起）。
+    长报告每张内容页都调用；启用后本页其余元素 y 坐标整体下移 bar_h，避免重叠。
+    """
+    from pptx.enum.shapes import MSO_SHAPE
+    W = 13.333                                   # 16:9 幻灯片宽度（英寸）
+    n = len(sections)
+    # 背景条：顶部通栏浅色
+    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0),
+                                 Inches(W), Inches(bar_h))
+    bar.fill.solid(); bar.fill.fore_color.rgb = RGBColor(0xF0, 0xF4, 0xF8)
+    bar.line.fill.background()
+    # 小节标签：等宽均分，当前小节高亮 + 下划线
+    sec_w = W / n
+    for i, sec in enumerate(sections):
+        is_active = (i == active)
+        tb = slide.shapes.add_textbox(Inches(i * sec_w), Inches(0),
+                                      Inches(sec_w), Inches(bar_h))
+        tf = tb.text_frame
+        tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        p = tf.paragraphs[0]; p.alignment = PP_ALIGN.CENTER
+        run = p.add_run(); run.text = sec
+        run.font.size = Pt(11)
+        run.font.bold = is_active
+        run.font.color.rgb = BLUE if is_active else MUTED
+        set_font(run)
+        if is_active:
+            under = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
+                Inches(i * sec_w + sec_w * 0.1), Inches(bar_h - 0.07),
+                Inches(sec_w * 0.8), Inches(0.05))
+            under.fill.solid(); under.fill.fore_color.rgb = BLUE
+            under.line.fill.background()
 ```
 
 ---
@@ -239,7 +275,59 @@ add_textbox(slide, 0.5, 6.4, 12.3, 0.5,
 
 ---
 
-## 7. 参考文献页与附录页
+## 7. 章节分隔页（>15 页的长报告：每个大部开始处插一页，帮助听众定位）
+
+深色底，与标题页/结论页呼应；部分标题用**一句话预告本节将论证什么**，帮助听众切换到新话题。
+
+```python
+# 章节分隔页
+slide = prs.slides.add_slide(prs.slide_layouts[6])
+slide.background.fill.solid()
+slide.background.fill.fore_color.rgb = RGBColor(0x1A, 0x3A, 0x5C)   # 略浅藏青，与正文区分节奏
+
+# 部分编号 / 标签（浅蓝小字）
+add_textbox(slide, 0.9, 1.9, 11.0, 0.5,
+            "第 2 部分 · 方法与数据", size=16, color=RGBColor(0x7B, 0xAF, 0xD4))
+# 部分标题（大号白字；读作一句话预告）
+add_textbox(slide, 0.9, 2.4, 11.0, 1.2,
+            "断点回归如何干净地识别处理效应", size=36, bold=True,
+            color=RGBColor(0xFF, 0xFF, 0xFF))
+# 强调分隔线
+add_rule(slide, 0.9, 3.8, 2.5, color=BLUE, h=0.06)
+# （可选）本节路线预览，一句话点出将要论证的几步
+add_textbox(slide, 0.9, 4.2, 11.0, 0.6,
+            "数据 → 识别假设 → 带宽选择 → 稳健性", size=18,
+            color=RGBColor(0xCA, 0xDC, 0xFC))
+```
+
+> 若采用 **可视/叙事** 风格，可在此页放一张带情感冲击的过渡图（仍保持深色底、图占一侧）。
+
+---
+
+## 8. 面包屑导航条（可选，>15 页或超长演讲：每张内容页顶部常驻）
+
+顶部通栏显示"当前在第几节"，适合长报告帮听众跟住结构。助手 `add_breadcrumb` 已加在第 0 节公共部分；调用时把**本页内容整体下移 `bar_h`** 以免与导航条重叠。
+
+```python
+# 全 deck 统一一份小节名单（顺序须与页面出现顺序一致）
+SECTIONS = ["动机", "数据", "识别策略", "结果", "讨论"]
+
+# 例：某"结果"页（下标从 0 起，故结果为 3）
+slide = prs.slides.add_slide(prs.slide_layouts[6])
+add_breadcrumb(slide, SECTIONS, active=3, bar_h=0.35)   # ← 先画导航条，再做本页内容
+
+# 本页内容整体从 y ≈ 0.6 起排布（标题下移 bar_h + 留白，避开导航条）
+add_textbox(slide, 0.5, 0.6, 12.3, 0.85,
+            "35 岁收入效应 18%，最低收入组（Q1）最大", size=26, bold=True, color=NAVY)
+add_rule(slide, 0.5, 1.5, 12.3)
+# …… 其余元素 y 坐标全部 +bar_h（约 0.35），页底引用 y ≈ 6.9+0.35
+```
+
+> 有章节分隔页时可省略面包屑，两者二选一即可（SKILL.md 要求二选一满足即可）。
+
+---
+
+## 9. 参考文献页与附录页
 
 ```python
 # 参考文献页（浅色底）
@@ -261,7 +349,7 @@ add_textbox(slide, 0.5, 0.6, 12.3, 0.8,
 
 ---
 
-## 8. 生成、转换与 QA
+## 10. 生成、转换与 QA
 
 ```bash
 # 1) 生成
